@@ -1,53 +1,51 @@
-@Configuration
-public class OAuth2ClientConfig {
+@Component
+public class OAuth2TokenRelayFilter extends ZuulFilter {
 
-    @Bean
-    public OAuth2AuthorizedClientManager authorizedClientManager(
-        ClientRegistrationRepository clientRegistrationRepository,
-        OAuth2AuthorizedClientService authorizedClientService) {
+    @Autowired
+    private OAuth2AuthorizedClientService authorizedClientService;
 
-        OAuth2AuthorizedClientProvider authorizedClientProvider = OAuth2AuthorizedClientProviderBuilder.builder()
-            .authorizationCode()
-            .refreshToken()
-            .build();
+    @Autowired
+    private OAuth2AuthorizedClientManager authorizedClientManager;
 
-        DefaultOAuth2AuthorizedClientManager authorizedClientManager = new DefaultOAuth2AuthorizedClientManager(
-            clientRegistrationRepository, authorizedClientService);
-        authorizedClientManager.setAuthorizedClientProvider(authorizedClientProvider);
-
-        return authorizedClientManager;
-    }
-}
-
-@Configuration
-public class WebClientConfig {
-
-    @Bean
-    public WebClient webClient(ReactiveOAuth2AuthorizedClientManager authorizedClientManager) {
-        ServerOAuth2AuthorizedClientExchangeFilterFunction oauth2Client = 
-                new ServerOAuth2AuthorizedClientExchangeFilterFunction(authorizedClientManager);
-        oauth2Client.setDefaultOAuth2AuthorizedClient(true);
-        return WebClient.builder()
-                .apply(oauth2Client.oauth2Configuration())
-                .build();
+    @Override
+    public String filterType() {
+        return "pre";
     }
 
-    @Bean
-    public ReactiveOAuth2AuthorizedClientManager authorizedClientManager(
-            ReactiveClientRegistrationRepository clientRegistrationRepository,
-            ServerOAuth2AuthorizedClientRepository authorizedClientRepository) {
+    @Override
+    public int filterOrder() {
+        return 1;
+    }
 
-        ReactiveOAuth2AuthorizedClientProvider authorizedClientProvider =
-                ReactiveOAuth2AuthorizedClientProviderBuilder.builder()
-                        .authorizationCode()
-                        .refreshToken()
-                        .build();
+    @Override
+    public boolean shouldFilter() {
+        return true;
+    }
 
-        AuthorizedClientServiceReactiveOAuth2AuthorizedClientManager authorizedClientManager =
-                new AuthorizedClientServiceReactiveOAuth2AuthorizedClientManager(
-                        clientRegistrationRepository, authorizedClientRepository);
-        authorizedClientManager.setAuthorizedClientProvider(authorizedClientProvider);
+    @Override
+    public Object run() {
+        RequestContext ctx = RequestContext.getCurrentContext();
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
 
-        return authorizedClientManager;
+        if (authentication != null && authentication.getPrincipal() instanceof OAuth2User) {
+            OAuth2User oauth2User = (OAuth2User) authentication.getPrincipal();
+            String principalName = oauth2User.getName();
+
+            OAuth2AuthorizedClient client = authorizedClientService.loadAuthorizedClient(
+                "okta", principalName);
+
+            if (client != null && client.getAccessToken() != null) {
+                if (client.getAccessToken().isExpired()) {
+                    OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest.withClientRegistrationId("okta")
+                            .principal(principalName)
+                            .build();
+
+                    client = authorizedClientManager.authorize(authorizeRequest);
+                }
+
+                ctx.addZuulRequestHeader("Authorization", "Bearer " + client.getAccessToken().getTokenValue());
+            }
+        }
+        return null;
     }
 }
